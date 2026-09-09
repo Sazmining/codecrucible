@@ -35,7 +35,8 @@ func TestChatCompletion_OpenAIStream_Text(t *testing.T) {
 		// on every chunk, reasoning_content interleaved, a trailing chunk with
 		// empty choices, then [DONE].
 		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":{"prompt_tokens":42,"completion_tokens":0}}`)
-		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":null}],"usage":{"prompt_tokens":42,"completion_tokens":3}}`)
+		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning_content":"let me "},"finish_reason":null}],"usage":{"prompt_tokens":42,"completion_tokens":2}}`)
+		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"reasoning":"think"},"finish_reason":null}],"usage":{"prompt_tokens":42,"completion_tokens":3}}`)
 		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"content":"{\"a\":"},"finish_reason":null}],"usage":{"prompt_tokens":42,"completion_tokens":5}}`)
 		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[{"index":0,"delta":{"content":"1}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":7}}`)
 		chunk(w, `{"id":"c1","model":"kimi-k3","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}`)
@@ -65,7 +66,7 @@ func TestChatCompletion_OpenAIStream_Text(t *testing.T) {
 		t.Fatalf("Usage = %+v, want 42/7 from the trailing chunk", resp.Usage)
 	}
 	if resp.Usage.ThinkingChars != len("let me think") {
-		t.Fatalf("ThinkingChars = %d, reasoning_content must be counted, not kept", resp.Usage.ThinkingChars)
+		t.Fatalf("ThinkingChars = %d, reasoning deltas must be counted, not kept", resp.Usage.ThinkingChars)
 	}
 	if resp.Model != "kimi-k3" {
 		t.Fatalf("Model = %q", resp.Model)
