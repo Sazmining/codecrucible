@@ -1257,7 +1257,8 @@ func (c *httpClient) readOpenAIStream(body io.Reader) (*ChatResponse, time.Durat
 			FinishReason string `json:"finish_reason"`
 			Delta        struct {
 				Content          flexString `json:"content"`
-				ReasoningContent string     `json:"reasoning_content"`
+				ReasoningContent string     `json:"reasoning_content"` // vLLM / DeepSeek field
+				Reasoning        string     `json:"reasoning"`         // OpenRouter / Kimi field
 				ToolCalls        []struct {
 					Function struct {
 						Arguments string `json:"arguments"`
@@ -1304,7 +1305,7 @@ func (c *httpClient) readOpenAIStream(body io.Reader) (*ChatResponse, time.Durat
 				firstDeltaAt = time.Now()
 			}
 			content.WriteString(string(choice.Delta.Content))
-			thinkingChars += len(choice.Delta.ReasoningContent)
+			thinkingChars += len(choice.Delta.ReasoningContent) + len(choice.Delta.Reasoning)
 			for _, tc := range choice.Delta.ToolCalls {
 				toolArgs.WriteString(tc.Function.Arguments)
 			}
