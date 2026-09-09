@@ -64,6 +64,20 @@ var providerPresets = map[string]providerPreset{
 	},
 }
 
+// outputModeFor picks the structured-output wire format for a model. The
+// name-based guess covers the hosted vendors; a registry entry that declares
+// supports_structured_output (an openai-compat deployment behind a proxy, say)
+// gets response_format json_schema, which is what that flag promises. Without
+// it every finding is scraped out of free text and a rambling model can run
+// to the output cap with nothing parseable.
+func outputModeFor(m config.ModelConfig) llm.OutputMode {
+	mode := llm.OutputModeForModel(m.Name)
+	if mode == llm.OutputModeNone && m.SupportsStructuredOutput {
+		return llm.OutputModeJSONSchema
+	}
+	return mode
+}
+
 // buildPhaseClient constructs an LLM client from a resolved PhaseConfig.
 // Everything that varies per-phase (provider, key, timeout, headers,
 // base URL, model params) comes from pc. Only Databricks host/token stay

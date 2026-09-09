@@ -14,6 +14,7 @@ import (
 	"github.com/block/codecrucible/internal/chunk"
 	"github.com/block/codecrucible/internal/config"
 	"github.com/block/codecrucible/internal/ingest"
+	"github.com/block/codecrucible/internal/llm"
 	"github.com/block/codecrucible/internal/sarif"
 )
 
@@ -1104,5 +1105,23 @@ func TestStreamingTokenCount_MatchesFullXMLCount(t *testing.T) {
 	if diff > maxDrift {
 		t.Errorf("streaming count %d diverges from full XML count %d by %d (max allowed %d)",
 			streamCount, fullCount, diff, maxDrift)
+	}
+}
+
+func TestOutputModeFor_RegistryFlagSelectsJSONSchema(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.ModelConfig
+		want llm.OutputMode
+	}{
+		{"gpt keeps its name-based mode", config.ModelConfig{Name: "gpt-5.6"}, llm.OutputModeJSONSchema},
+		{"claude keeps tool use", config.ModelConfig{Name: "claude-sonnet-5"}, llm.OutputModeToolUse},
+		{"unknown model without the flag stays unstructured", config.ModelConfig{Name: "deepseek-v4-flash"}, llm.OutputModeNone},
+		{"unknown model with the flag gets json_schema", config.ModelConfig{Name: "deepseek-v4-flash", SupportsStructuredOutput: true}, llm.OutputModeJSONSchema},
+	}
+	for _, tc := range cases {
+		if got := outputModeFor(tc.cfg); got != tc.want {
+			t.Errorf("%s: outputModeFor = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

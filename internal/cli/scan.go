@@ -451,7 +451,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	schema := llm.SecurityAnalysisSchema()
-	outputMode := llm.OutputModeForModel(modelCfg.Name)
+	outputMode := outputModeFor(modelCfg)
 	repoName := filepath.Base(repoRoot)
 	artifacts := newPhaseArtifactWriter(cfg)
 	if artifacts.Enabled() {
@@ -513,7 +513,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 			slog.Info("feature detection uses separate configuration",
 				"provider", fd.Provider, "model", fd.ModelCfg.Name)
 		}
-		fdOutputMode := llm.OutputModeForModel(fd.ModelCfg.Name)
+		fdOutputMode := outputModeFor(fd.ModelCfg)
 		var fdCorrection float64
 		detectedFeatures, fdCorrection, err = runFeatureDetection(cmd.Context(), filtered, repoName, fdClient, fdEndpoint, fd.ModelCfg, promptLoader, fdOutputMode, fd.ModelParams, counter)
 		if err != nil {
@@ -810,7 +810,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 			slog.Info("audit phase uses separate configuration",
 				"provider", audit.Provider, "model", audit.ModelCfg.Name)
 		}
-		auditOutputMode := llm.OutputModeForModel(audit.ModelCfg.Name)
+		auditOutputMode := outputModeFor(audit.ModelCfg)
 
 		auditedDoc, auditUsage, auditCost, auditErr := runAuditPhase(
 			cmd.Context(), merged, repoName,

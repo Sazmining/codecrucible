@@ -371,6 +371,15 @@ type apiRequest struct {
 	ResponseFormat      *responseFormat  `json:"response_format,omitempty"`
 	Tools               []toolDefinition `json:"tools,omitempty"`
 	ToolChoice          any              `json:"tool_choice,omitempty"`
+	Stream              bool             `json:"stream,omitempty"`
+	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
+}
+
+// streamOptions asks an OpenAI-compatible server to append a usage block to
+// the stream; OpenAI omits it otherwise, while vLLM-style servers send it
+// regardless.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type responseFormat struct {
@@ -414,6 +423,15 @@ func (c *httpClient) buildRequestBody(req ChatRequest, forceToolChoice, dropTemp
 		apiReq.MaxCompletionTokens = req.MaxTokens
 	} else {
 		apiReq.MaxTokens = req.MaxTokens
+	}
+	if c.streamsOpenAI() {
+		// Same reason the Anthropic path streams: SSE frames keep the
+		// connection alive through a long generation, where a blocking request
+		// trips proxy and edge idle timeouts (a local Maple proxy 500s at ~120s).
+		// A model_params override of stream:false still wins in the merge and
+		// falls through to the blocking parser on Content-Type.
+		apiReq.Stream = true
+		apiReq.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 
 	switch req.OutputMode {
@@ -621,7 +639,10 @@ func (c *httpClient) handleResponse(resp *http.Response) (*ChatResponse, time.Du
 	// stream; 4xx/5xx still return a JSON error body.
 	if resp.StatusCode == http.StatusOK &&
 		strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		return c.readAnthropicStream(resp.Body)
+		if c.provider == "anthropic" {
+			return c.readAnthropicStream(resp.Body)
+		}
+		return c.readOpenAIStream(resp.Body)
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -1106,6 +1127,133 @@ func (c *httpClient) readAnthropicStream(body io.Reader) (*ChatResponse, time.Du
 	// what we have so the retry log is informative, but don't return a partial
 	// result: tool_use input is likely truncated mid-JSON.
 	return nil, 0, fmt.Errorf("llm: stream ended without message_stop (got %d blocks, stop_reason=%q)", len(resp.Content), resp.StopReason)
+}
+
+// streamsOpenAI reports whether requests on the OpenAI chat-completions wire
+// (direct OpenAI, openai-compat servers, Ollama, Google's compat layer) are
+// sent with stream:true. Databricks stays blocking: its serving proxy has not
+// been exercised with SSE here.
+func (c *httpClient) streamsOpenAI() bool {
+	return c.provider == "openai" || c.provider == "google"
+}
+
+// readOpenAIStream consumes a chat-completions SSE response and reconstructs
+// the ChatResponse the blocking path would have produced, so callers see no
+// difference.
+//
+// Each "data:" line carries one chat.completion.chunk. We accumulate
+// choices[0].delta.content, choices[0].delta.tool_calls[0].function.arguments
+// (structured output via tools), and the last finish_reason; usage is taken
+// from whichever chunk carries it (servers differ: OpenAI sends one trailing
+// chunk with empty choices when stream_options.include_usage is set, vLLM
+// sends usage on every chunk). reasoning_content deltas are counted, never
+// kept — the parsers downstream only read the answer.
+func (c *httpClient) readOpenAIStream(body io.Reader) (*ChatResponse, time.Duration, error) {
+	streamStart := time.Now()
+	var firstDeltaAt time.Time
+
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var content, toolArgs strings.Builder
+	var finishReason, model string
+	var usage TokenUsage
+	var thinkingChars int
+	done := false
+
+	// One chunk of the stream. Declared as a type so each iteration decodes
+	// into a zero value: Unmarshal leaves absent fields at their prior value,
+	// and a reasoning or tool_calls delta from the previous chunk would
+	// otherwise be counted again.
+	type streamChunk struct {
+		Model   string    `json:"model"`
+		Error   *apiError `json:"error"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Delta        struct {
+				Content          flexString `json:"content"`
+				ReasoningContent string     `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 {
+			continue
+		}
+		if bytes.Equal(payload, []byte("[DONE]")) {
+			done = true
+			break
+		}
+
+		var ev streamChunk
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			return nil, 0, fmt.Errorf("llm: parsing stream chunk: %w", err)
+		}
+		if ev.Error != nil {
+			return nil, 0, fmt.Errorf("llm: stream error (%s): %s", ev.Error.Type, ev.Error.Message)
+		}
+		if ev.Model != "" {
+			model = ev.Model
+		}
+		if ev.Usage != nil {
+			usage.PromptTokens = ev.Usage.PromptTokens
+			usage.CompletionTokens = ev.Usage.CompletionTokens
+		}
+		for _, choice := range ev.Choices {
+			if firstDeltaAt.IsZero() && (choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0) {
+				firstDeltaAt = time.Now()
+			}
+			content.WriteString(string(choice.Delta.Content))
+			thinkingChars += len(choice.Delta.ReasoningContent)
+			for _, tc := range choice.Delta.ToolCalls {
+				toolArgs.WriteString(tc.Function.Arguments)
+			}
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, 0, fmt.Errorf("llm: reading stream: %w", err)
+	}
+	// A stream that ends without [DONE] and without a finish_reason was cut
+	// mid-generation; the partial JSON is worthless and the retry loop should
+	// see an error, not a truncated success.
+	if !done && finishReason == "" {
+		return nil, 0, fmt.Errorf("llm: stream ended without [DONE] or finish_reason (%d content chars)", content.Len())
+	}
+
+	out := content.String()
+	if out == "" && toolArgs.Len() > 0 {
+		out = toolArgs.String()
+	}
+	usage.ThinkingChars = thinkingChars
+	resp := &ChatResponse{
+		Content:      out,
+		Usage:        usage,
+		FinishReason: finishReason,
+		Model:        model,
+	}
+	if !firstDeltaAt.IsZero() {
+		resp.TimeToFirstToken = firstDeltaAt.Sub(streamStart)
+		resp.GenerationTime = time.Since(firstDeltaAt)
+	}
+	return resp, 0, nil
 }
 
 func isToolChoiceIncompatibleError(body string) bool {
